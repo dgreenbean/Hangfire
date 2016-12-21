@@ -37,7 +37,7 @@ namespace Hangfire.SqlServer
 
         private readonly SqlServerStorage _storage;
         private readonly SqlServerStorageOptions _options;
-		
+        
         public SqlServerJobQueue([NotNull] SqlServerStorage storage, SqlServerStorageOptions options)
         {
             if (storage == null) throw new ArgumentNullException(nameof(storage));
@@ -60,7 +60,12 @@ namespace Hangfire.SqlServer
 $@"delete top (1) JQ
 output DELETED.Id, DELETED.JobId, DELETED.Queue
 from [{_storage.SchemaName}].JobQueue JQ with (readpast, updlock, rowlock, forceseek)
-where Queue in @queues";
+join (select top 1 JQ2.[Id], (case JQ2.FetchedAt when null then 0 else 1 end) FetchedAtNull from [{_storage.SchemaName}].JobQueue JQ2 with (readpast, updlock, rowlock, forceseek)
+    where JQ2.Queue in @queues
+    order by FetchedAtNull, JQ2.FetchedAt) j on JQ.Id = JQ2.Id";
+
+            string updateJobQueueTemplate =
+$@"update [{_storage.SchemaName}].JobQueue set FetchedAt = getutcdate() where Id = @id";
 
             do
             {
@@ -78,6 +83,23 @@ where Queue in @queues";
 
                     if (fetchedJob != null)
                     {
+                        DbTransaction updateTransaction = null;
+                        try
+                        {
+                            updateTransaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
+                            connection.Execute(updateJobQueueTemplate, new { id = fetchedJob.Id }, updateTransaction);
+                            updateTransaction.Commit();
+                        }
+                        catch (Exception)
+                        {
+                            updateTransaction?.Rollback();
+                            throw;
+                        }
+                        finally
+                        {
+                            updateTransaction?.Dispose();
+                        }
+
                         return new SqlServerFetchedJob(
                             _storage,
                             connection,
