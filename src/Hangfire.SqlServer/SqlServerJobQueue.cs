@@ -37,7 +37,7 @@ namespace Hangfire.SqlServer
 
         private readonly SqlServerStorage _storage;
         private readonly SqlServerStorageOptions _options;
-		
+        
         public SqlServerJobQueue([NotNull] SqlServerStorage storage, SqlServerStorageOptions options)
         {
             if (storage == null) throw new ArgumentNullException(nameof(storage));
@@ -56,11 +56,12 @@ namespace Hangfire.SqlServer
             FetchedJob fetchedJob = null;
             DbTransaction transaction = null;
 
-            string fetchJobSqlTemplate =
-$@"delete top (1) JQ
-output DELETED.Id, DELETED.JobId, DELETED.Queue
-from [{_storage.SchemaName}].JobQueue JQ with (readpast, updlock, rowlock, forceseek)
-where Queue in @queues";
+            string selectJobSqlTemplate =
+$@"select top 1 JQ.[Id], JQ.[JobId], JQ.[Queue], (case JQ.FetchedAt when null then 0 else 1 end) FetchedAtNull from [{_storage.SchemaName}].JobQueue JQ with (readpast, updlock, rowlock, forceseek) where JQ.Queue in @queues order by FetchedAtNull, JQ.FetchedAt";
+
+            string updateJobQueueTemplate = $@"update [{_storage.SchemaName}].JobQueue set FetchedAt = getutcdate() where Id = @id";
+
+            string deleteJobSqlTemplate = $@"delete from [{_storage.SchemaName}].JobQueue where Id = @id";
 
             do
             {
@@ -72,12 +73,15 @@ where Queue in @queues";
                     transaction = connection.BeginTransaction(IsolationLevel.ReadCommitted);
 
                     fetchedJob = connection.Query<FetchedJob>(
-                        fetchJobSqlTemplate,
+                        selectJobSqlTemplate,
                         new { queues = queues },
                         transaction).SingleOrDefault();
 
                     if (fetchedJob != null)
                     {
+                        connection.Execute(updateJobQueueTemplate, new { id = fetchedJob.Id }, transaction);
+                        connection.Execute(deleteJobSqlTemplate, new { id = fetchedJob.Id }, transaction);
+
                         return new SqlServerFetchedJob(
                             _storage,
                             connection,
